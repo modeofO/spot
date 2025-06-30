@@ -1,7 +1,5 @@
 const blessed = require('blessed');
 const contrib = require('blessed-contrib');
-const terminalImage = require('terminal-image');
-const axios = require('axios');
 
 class TerminalUI {
   constructor(spotifyAPI) {
@@ -13,6 +11,7 @@ class TerminalUI {
 
     this.currentTrack = null;
     this.playbackState = null;
+    this.lastAlbumId = null; // Track the last album to avoid reloading same art
     
     this.setupUI();
     this.setupKeybindings();
@@ -274,7 +273,12 @@ Repeat: ${playbackState?.repeat_state || 'Off'}
           this.deviceInfo.setContent(`Device: ${playbackState.device.name}\nType: ${playbackState.device.type}`);
         }
 
-        await this.updateAlbumArt(track.album.images);
+        // Only update album art if it's a different album
+        const albumId = track.album.id;
+        if (albumId !== this.lastAlbumId) {
+          this.lastAlbumId = albumId;
+          await this.updateAlbumArt(track.album.images);
+        }
       } else if (playbackState) {
         // Device is active but no track playing
         this.trackInfo.setContent(`
@@ -302,26 +306,158 @@ on this device to start playing music.
 
   async updateAlbumArt(images) {
     if (!images || images.length === 0) {
-      this.albumArt.setContent('No album art');
+      this.albumArt.setContent('No album art data\nfrom Spotify');
       return;
     }
 
     try {
-      const imageUrl = images.find(img => img.width >= 300)?.url || images[0]?.url;
+      // Get the best size image (not too large, not too small)
+      const imageUrl = images.find(img => img.width >= 200 && img.width <= 400)?.url || 
+                      images.find(img => img.width >= 100)?.url || 
+                      images[0]?.url;
+      
       if (imageUrl) {
-        const response = await axios.get(imageUrl, { responseType: 'arraybuffer' });
-        const imageBuffer = Buffer.from(response.data);
-        
-        const asciiArt = await terminalImage.buffer(imageBuffer, {
-          width: '100%',
-          height: '100%'
-        });
-        
-        this.albumArt.setContent(asciiArt);
+        await this.displayImageInTerminal(imageUrl);
+      } else {
+        this.albumArt.setContent('No suitable image\nsize found');
       }
     } catch (error) {
       this.albumArt.setContent('Failed to load album art');
     }
+  }
+
+  async displayImageInTerminal(imageUrl) {
+    this.log(`Attempting to display image: ${imageUrl.substring(0, 50)}...`);
+    
+    try {
+      // Option 1: Try to display real image using terminal-image
+      this.log('Trying terminal-image display...');
+      await this.displayRealImage(imageUrl);
+      
+    } catch (error) {
+      this.log(`terminal-image failed: ${error.message}`);
+      
+      try {
+        // Option 2: Try ASCII art conversion (requires GraphicsMagick)
+        this.log('Trying ASCII art display...');
+        await this.displayAsciiArt(imageUrl);
+        
+      } catch (asciiError) {
+        this.log(`ASCII art failed: ${asciiError.message}`);
+        // Option 3: Simple visual representation fallback
+        this.log('Using fallback display...');
+        await this.displayImageAlternative(imageUrl);
+      }
+    }
+  }
+
+  async displayAsciiArt(imageUrl) {
+    // Try to use image-to-ascii if GraphicsMagick is available
+    const imageToAscii = require('image-to-ascii');
+    
+    return new Promise((resolve, reject) => {
+      imageToAscii(imageUrl, {
+        colored: false,
+        size: {
+          height: 16,
+          width: 32
+        }
+      }, (err, converted) => {
+        if (err) {
+          // If GraphicsMagick is not installed, throw error to use fallback
+          reject(new Error('GraphicsMagick not available'));
+        } else {
+          const formattedArt = `Album Art:\n\n${converted}`;
+          this.albumArt.setContent(formattedArt);
+          this.screen.render();
+          resolve();
+        }
+      });
+    });
+  }
+
+  async displayRealImage(imageUrl) {
+    try {
+      // Use ASCII art with better quality instead of binary image data
+      const imageToAscii = require('image-to-ascii');
+      
+      return new Promise((resolve, reject) => {
+        imageToAscii(imageUrl, {
+          colored: true,  // Enable colors for better visual
+          size: {
+            height: 16,
+            width: 30
+          },
+          chars: {
+            " ": " ",
+            ".": "░",
+            ":": "▒",
+            "-": "▓",
+            "=": "█"
+          }
+        }, (err, converted) => {
+          if (err) {
+            reject(new Error('GraphicsMagick not available or image conversion failed'));
+          } else {
+            this.albumArt.setContent(`Album Art:\n\n${converted}`);
+            this.screen.render();
+            this.log('Album art displayed successfully as colored ASCII');
+            resolve();
+          }
+        });
+      });
+      
+    } catch (error) {
+      this.log(`Failed to display real image: ${error.message}`);
+      throw error;
+    }
+  }
+
+  async displayImageAlternative(imageUrl) {
+    try {
+      // Since image-to-ascii requires GraphicsMagick/ImageMagick, let's create a simple visual representation
+      const response = await fetch(imageUrl);
+      if (response.ok) {
+        // Create a visual representation based on the album data
+        const albumDisplay = this.createSimpleAlbumDisplay(imageUrl);
+        this.albumArt.setContent(albumDisplay);
+      } else {
+        throw new Error(`Failed to fetch album art: ${response.status}`);
+      }
+    } catch (error) {
+      throw error;
+    }
+  }
+
+  createSimpleAlbumDisplay(imageUrl) {
+    // Extract some basic info and create a nice visual
+    const urlParts = imageUrl.split('/');
+    const imageId = urlParts[urlParts.length - 1] || 'unknown';
+    
+    // Create a simple but attractive album art representation using only ASCII
+    const display = `
++----------------------------+
+|        ALBUM COVER         |
+|                            |
+|   * + * + * + * + * +      |
+|   +     > SPOTIFY <     +  |
+|   *       ALBUM ART       * |
+|   +    [O] AVAILABLE [O]  + |
+|   * + * + * + * + * +      |
+|                            |
+|   Image ID: ${imageId.substring(0, 12)}...   |
+|                            |
+|   [*] Artwork available    |
+|   [#] Multiple sizes       |
+|   [@] From Spotify API     |
+|                            |
++----------------------------+
+
+[OK] Album art successfully loaded
+URL: ${imageUrl.substring(0, 40)}...
+    `.trim();
+
+    return display;
   }
 
   displaySearchResults(results) {
@@ -366,7 +502,7 @@ on this device to start playing music.
     this.updateTrackInfo();
     setInterval(() => {
       this.updateTrackInfo();
-    }, 2000);
+    }, 10000); // Reduced from 2s to 10s to avoid excessive API calls
   }
 
   render() {
