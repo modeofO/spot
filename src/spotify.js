@@ -132,6 +132,30 @@ class SpotifyAPI {
     });
   }
 
+  async seek(positionMs) {
+    await this.request(`/me/player/seek?position_ms=${Math.max(0, Math.round(positionMs))}`, 'PUT');
+    return true;
+  }
+
+  async getQueue() {
+    return await this.request('/me/player/queue');
+  }
+
+  async isSaved(trackId) {
+    const result = await this.request(`/me/tracks/contains?ids=${trackId}`);
+    return Array.isArray(result) ? result[0] === true : false;
+  }
+
+  async saveTrack(trackId) {
+    await this.request(`/me/tracks?ids=${trackId}`, 'PUT');
+    return true;
+  }
+
+  async removeSavedTrack(trackId) {
+    await this.request(`/me/tracks?ids=${trackId}`, 'DELETE');
+    return true;
+  }
+
   async search(query, type = 'track', limit = 20) {
     const params = new URLSearchParams({
       q: query,

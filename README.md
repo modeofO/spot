@@ -73,11 +73,14 @@ so the file is rewritten each time.
 | `p` | Previous track |
 | `s` | Toggle shuffle |
 | `r` | Cycle repeat mode (off → context → track → off) |
+| `←` / `→` | Seek 10 seconds |
 | `+` / `=` | Increase volume |
 | `-` | Decrease volume |
+| `f` | Like / unlike the current track |
 | `l` | Browse your library (Liked Songs + playlists) |
+| `u` | Show what's up next |
 | `/` | Focus search box |
-| `d` | Show available devices |
+| `d` | Switch playback device |
 | `q` | Quit |
 
 In any list (library, playlist contents, search results):
@@ -89,8 +92,11 @@ In any list (library, playlist contents, search results):
 | `Esc` | Go back one level, or close |
 
 Playing a track from a playlist starts the playlist at that track, so the rest
-stays queued behind it. Liked Songs has no playable context URI, so the selected
-track and the next 50 are queued explicitly.
+stays queued behind it. Albums and artists from search play the same way. Liked
+Songs has no playable context URI, so the selected track and the next 50 are
+queued explicitly.
+
+Search covers tracks, albums and artists; results are tagged by type.
 
 Volume keys only work on devices that accept remote volume control. Phones
 usually report `supports_volume: false`, and Spotify rejects the request with
@@ -126,6 +132,9 @@ The terminal interface is divided into several sections:
 - Check your Client ID and Client Secret in `.env`
 - Make sure the redirect URI matches exactly: `http://127.0.0.1:8888/callback`
 - `Refresh token revoked` — delete `.spotify_token` and re-authenticate
+- `Token is missing permissions` — a stored token only carries the scopes it was
+  granted, so a new feature can need a fresh consent. The app clears the token
+  and re-authenticates on its own
 - `Port 8888 is already in use` — free the port or change `PORT` in `.env` (and the dashboard)
 
 ### Album art not displaying

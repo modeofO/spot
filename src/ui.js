@@ -174,8 +174,8 @@ class TerminalUI {
 
   getControlsText() {
     return `
- [Space] Play/Pause  [n] Next  [p] Previous  [s] Shuffle  [r] Repeat
- [+/-] Volume  [l] Library  [/] Search  [d] Devices  [q] Quit
+ [Space] Play/Pause  [n] Next  [p] Previous  [←/→] Seek 10s  [s] Shuffle  [r] Repeat
+ [+/-] Volume  [f] Like  [l] Library  [u] Up Next  [/] Search  [d] Devices  [q] Quit
  In a list: [↑/↓] Move  [Enter] Play  [Esc] Back
     `.trim();
   }
@@ -240,6 +240,12 @@ class TerminalUI {
     this.bindKey(['+', '='], () => this.changeVolume(10));
     this.bindKey('-', () => this.changeVolume(-10));
 
+    this.bindKey('right', () => this.seekBy(10000));
+    this.bindKey('left', () => this.seekBy(-10000));
+
+    this.bindKey('f', () => this.toggleSaved());
+    this.bindKey('u', () => this.openQueue());
+
     this.bindKey('/', () => {
       this.searchBox.focus();
     });
@@ -251,7 +257,7 @@ class TerminalUI {
       if (!text.trim()) return;
 
       try {
-        const results = await this.spotify.search(text.trim());
+        const results = await this.spotify.search(text.trim(), 'track,album,artist', 8);
         this.displaySearchResults(results);
       } catch (error) {
         this.log(`Search error: ${error.message}`);
@@ -279,9 +285,80 @@ class TerminalUI {
 
     this.bindKey('l', () => this.openLibrary());
 
-    this.bindKey('d', async () => {
-      const devices = await this.spotify.getDevices();
-      this.displayDevices(devices);
+    this.bindKey('d', () => this.openDevices());
+  }
+
+  // Seeking optimistically moves the anchor so repeated presses stack instead
+  // of all computing from the same polled position, and suppresses the next
+  // poll's anchor update long enough for Spotify to apply the seek.
+  async seekBy(deltaMs) {
+    const anchor = this.progressAnchor;
+    if (!anchor) {
+      this.log('Nothing playing to seek');
+      return;
+    }
+
+    const drift = anchor.playing ? Date.now() - anchor.at : 0;
+    const current = Math.min(anchor.duration, anchor.ms + drift);
+    const target = Math.min(anchor.duration - 1000, Math.max(0, current + deltaMs));
+
+    this.progressAnchor = { ...anchor, ms: target, at: Date.now() };
+    this.seekedAt = Date.now();
+    this.renderProgress();
+    this.screen.render();
+
+    await this.spotify.seek(target);
+    this.log(`Seek to ${this.formatTime(target)}`);
+  }
+
+  async toggleSaved() {
+    const track = this.playbackState?.item;
+    if (!track) {
+      this.log('Nothing playing to save');
+      return;
+    }
+
+    if (this.trackSaved) {
+      await this.spotify.removeSavedTrack(track.id);
+      this.trackSaved = false;
+      this.log(`Removed from Liked Songs: ${track.name}`);
+    } else {
+      await this.spotify.saveTrack(track.id);
+      this.trackSaved = true;
+      this.log(`Saved to Liked Songs: ${track.name}`);
+    }
+
+    this.updateTrackInfo();
+  }
+
+  async openQueue() {
+    const queue = await this.spotify.getQueue();
+    const items = (queue?.queue || []).filter(Boolean).slice(0, 50).map(trackEntry);
+
+    this.openPicker('Up Next', items, (item) =>
+      this.playTracks([item.track.uri], item.track)
+    );
+  }
+
+  async openDevices() {
+    const devices = await this.spotify.getDevices();
+    const items = (devices?.devices || []).map((device) => {
+      const flags = [
+        device.is_active ? 'active' : null,
+        device.supports_volume ? null : 'no volume control'
+      ].filter(Boolean);
+
+      return {
+        label: `${device.name} — ${device.type}${flags.length ? `  (${flags.join(', ')})` : ''}`,
+        device
+      };
+    });
+
+    this.openPicker('Devices', items, async (item) => {
+      await this.spotify.transferPlayback(item.device.id);
+      this.closePicker();
+      this.log(`Playback moved to ${item.device.name}`);
+      setTimeout(() => this.updateTrackInfo(), 800);
     });
   }
 
@@ -448,8 +525,14 @@ The player will automatically detect playback once started.
         const albumName = track.album.name;
         const trackName = track.name;
         
+        // One extra request per track change, not per poll.
+        if (track.id !== this.savedCheckId) {
+          this.savedCheckId = track.id;
+          this.trackSaved = await this.spotify.isSaved(track.id).catch(() => false);
+        }
+
         const trackText = `
-Track: ${trackName}
+Track: ${trackName}${this.trackSaved ? '  ♥' : ''}
 Artist: ${artists}
 Album: ${albumName}
 Duration: ${this.formatTime(track.duration_ms)}
@@ -462,7 +545,10 @@ Repeat: ${playbackState?.repeat_state || 'Off'}
 
         this.trackInfo.setContent(trackText);
 
-        if (playbackState?.progress_ms !== undefined && track.duration_ms) {
+        // A seek that Spotify has not applied yet would snap the bar back, so
+        // leave the anchor alone briefly after one.
+        const seeking = Date.now() - (this.seekedAt || 0) < 2000;
+        if (playbackState?.progress_ms !== undefined && track.duration_ms && !seeking) {
           this.progressAnchor = {
             ms: playbackState.progress_ms,
             duration: track.duration_ms,
@@ -703,29 +789,34 @@ on this device to start playing music.
   }
 
   displaySearchResults(results) {
-    const tracks = results.tracks?.items || [];
+    const items = [];
 
-    if (tracks.length === 0) {
+    for (const track of (results.tracks?.items || []).filter(Boolean)) {
+      const entry = trackEntry(track);
+      items.push({ ...entry, label: `[track]  ${entry.label}` });
+    }
+
+    for (const album of (results.albums?.items || []).filter(Boolean)) {
+      const artists = album.artists.map((artist) => artist.name).join(', ');
+      items.push({ label: `[album]  ${album.name} — ${artists}`, context: album });
+    }
+
+    for (const artist of (results.artists?.items || []).filter(Boolean)) {
+      items.push({ label: `[artist] ${artist.name}`, context: artist });
+    }
+
+    if (items.length === 0) {
       this.log('No search results found');
       return;
     }
 
-    this.openPicker('Search Results', tracks.map(trackEntry), (item) =>
-      this.playTracks([item.track.uri], item.track)
+    // Albums and artists play as a context so the whole thing queues up; a
+    // single track does not have one worth using.
+    this.openPicker('Search Results', items, (item) =>
+      item.track
+        ? this.playTracks([item.track.uri], item.track)
+        : this.playContext(item.context.uri, null, item.context)
     );
-  }
-
-  displayDevices(devices) {
-    if (devices.devices?.length > 0) {
-      let deviceText = 'Available Devices:\n\n';
-      devices.devices.forEach((device, index) => {
-        const active = device.is_active ? ' (Active)' : '';
-        deviceText += `${index + 1}. ${device.name} - ${device.type}${active}\n`;
-      });
-      this.log(deviceText);
-    } else {
-      this.log('No devices found');
-    }
   }
 
   setBar(box, percent, label, color) {

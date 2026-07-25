@@ -13,15 +13,17 @@ class SpotifyAuth {
     this.port = Number(process.env.PORT) || 8888;
     this.redirectUri = process.env.REDIRECT_URI || `http://127.0.0.1:${this.port}/callback`;
     this.tokenPath = path.join(__dirname, '../.spotify_token');
-    this.scopes = [
+    this.scopeList = [
       'user-read-playback-state',
       'user-modify-playback-state',
       'user-read-currently-playing',
       'playlist-read-private',
       'playlist-read-collaborative',
       'user-library-read',
+      'user-library-modify',
       'user-read-private'
-    ].join(' ');
+    ];
+    this.scopes = this.scopeList.join(' ');
 
     this.validateRedirectUri();
   }
@@ -223,11 +225,25 @@ class SpotifyAuth {
     return tokenData;
   }
 
+  // A stored token only carries the scopes it was granted, so adding a feature
+  // that needs a new one has to force a fresh consent rather than 403 later.
+  missingScopes(tokenData) {
+    const granted = new Set((tokenData.scope || '').split(' ').filter(Boolean));
+    return this.scopeList.filter((scope) => !granted.has(scope));
+  }
+
   async getValidToken() {
     let tokenData = this.loadToken();
 
     if (!tokenData) {
       console.log('No token found. Starting authentication...');
+      tokenData = await this.authorize();
+    }
+
+    const missing = this.missingScopes(tokenData);
+    if (missing.length > 0) {
+      console.log(`Token is missing permissions (${missing.join(', ')}). Re-authenticating...`);
+      this.clearToken();
       tokenData = await this.authorize();
     }
 
