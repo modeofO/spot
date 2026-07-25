@@ -1,6 +1,26 @@
 const blessed = require('blessed');
 const contrib = require('blessed-contrib');
 
+const RESET = '\x1b[0m';
+const TRUECOLOR = /^(truecolor|24bit)$/i.test(process.env.COLORTERM || '');
+
+// Nearest entry in the xterm 6x6x6 colour cube, used when the terminal has not
+// advertised 24-bit colour.
+function xterm256(r, g, b) {
+  const level = (v) => (v < 48 ? 0 : v < 114 ? 1 : Math.floor((v - 35) / 40));
+  return 16 + 36 * level(r) + 6 * level(g) + level(b);
+}
+
+function sgr(layer, [r, g, b]) {
+  return TRUECOLOR
+    ? `\x1b[${layer};2;${r};${g};${b}m`
+    : `\x1b[${layer};5;${xterm256(r, g, b)}m`;
+}
+
+function sameColor(a, b) {
+  return b !== null && a[0] === b[0] && a[1] === b[1] && a[2] === b[2];
+}
+
 class TerminalUI {
   constructor(spotifyAPI) {
     this.spotify = spotifyAPI;
@@ -12,7 +32,12 @@ class TerminalUI {
     this.currentTrack = null;
     this.playbackState = null;
     this.lastAlbumId = null; // Track the last album to avoid reloading same art
-    
+    this.art = null;
+
+    // Repaint the cover after every frame; blessed draws the pane empty and
+    // knows nothing about the raw escape sequences layered on top of it.
+    this.screen.on('render', () => this.paintAlbumArt());
+
     this.setupUI();
     this.setupKeybindings();
     this.startUpdateLoop();
@@ -249,8 +274,17 @@ class TerminalUI {
       return;
     }
 
-    const current = device?.volume_percent ?? 50;
+    // playbackState only refreshes on the poll, so stepping off it made every
+    // press inside a poll window compute the same target. Step off our own
+    // pending value instead and let the poll reconcile once it catches up.
+    const current = this.volumeTarget ?? device?.volume_percent ?? 50;
     const target = Math.min(100, Math.max(0, current + delta));
+
+    this.volumeTarget = target;
+    this.volumeChangedAt = Date.now();
+    this.setBar(this.volumeBar, target, `${target}%`, 'blue');
+    this.screen.render();
+
     await this.spotify.setVolume(target);
     this.log(`Volume: ${target}%`);
   }
@@ -282,6 +316,7 @@ Please:
 
 The player will automatically detect playback once started.
         `.trim());
+        this.art = null;
         this.albumArt.setContent('No album art');
         this.deviceInfo.setContent('No active device');
         this.progressAnchor = null;
@@ -322,7 +357,15 @@ Repeat: ${playbackState?.repeat_state || 'Off'}
         }
 
         if (playbackState?.device?.volume_percent !== undefined) {
-          const volume = playbackState.device.volume_percent;
+          const reported = playbackState.device.volume_percent;
+
+          // Drop the optimistic value once the device agrees, or once it has
+          // had long enough to and clearly is not going to.
+          if (this.volumeTarget === reported || Date.now() - (this.volumeChangedAt || 0) > 3000) {
+            this.volumeTarget = null;
+          }
+
+          const volume = this.volumeTarget ?? reported;
           this.setBar(this.volumeBar, volume, `${volume}%`, 'blue');
         }
 
@@ -349,9 +392,11 @@ on this device to start playing music.
           this.deviceInfo.setContent(`Device: ${playbackState.device.name}\nType: ${playbackState.device.type}`);
         }
         
+        this.art = null;
         this.albumArt.setContent('No album art');
       } else {
         this.trackInfo.setContent('No track currently playing');
+        this.art = null;
         this.albumArt.setContent('No album art');
       }
 
@@ -385,8 +430,10 @@ on this device to start playing music.
 
   async displayImageInTerminal(imageUrl) {
     try {
-      this.albumArt.setContent(await this.renderAlbumArt(imageUrl));
+      this.art = await this.renderAlbumArt(imageUrl);
+      this.albumArt.setContent('');
     } catch (error) {
+      this.art = null;
       this.log(`Album art failed: ${error.message}`);
       this.albumArt.setContent('\n  Album art\n  unavailable');
     }
@@ -397,6 +444,10 @@ on this device to start playing music.
   // pixel becomes the foreground, the bottom one the background. That doubles
   // vertical resolution and cancels out the roughly 2:1 aspect of a terminal
   // cell, so a square cover stays square.
+  //
+  // blessed quantises every colour to the 256-colour palette, which turns any
+  // gradient into visible banding, so the rows are emitted as raw SGR and
+  // painted over the pane after blessed has drawn (see paintAlbumArt).
   async renderAlbumArt(imageUrl) {
     const sharp = require('sharp');
 
@@ -411,29 +462,64 @@ on this device to start playing music.
     const size = Math.max(8, Math.min(cols, rows * 2) & ~1);
 
     const { data, info } = await sharp(source)
-      .resize(size, size, { fit: 'fill' })
+      .resize(size, size, { fit: 'fill', kernel: 'lanczos3' })
       .removeAlpha()
       .raw()
       .toBuffer({ resolveWithObject: true });
 
-    const hex = (x, y) => {
+    const at = (x, y) => {
       const i = (y * info.width + x) * info.channels;
-      return data.toString('hex', i, i + 3);
+      return [data[i], data[i + 1], data[i + 2]];
     };
-
-    // The cover is square, so it rarely fills a wider box — centre it.
-    const pad = ' '.repeat(Math.max(0, Math.floor((cols - size) / 2)));
 
     const lines = [];
     for (let y = 0; y < size; y += 2) {
-      let line = pad;
+      let line = '';
+      let lastTop = null;
+      let lastBottom = null;
+
       for (let x = 0; x < size; x++) {
-        line += `{#${hex(x, y)}-fg}{#${hex(x, y + 1)}-bg}▀{/}`;
+        const top = at(x, y);
+        const bottom = at(x, y + 1);
+
+        // Only re-emit a colour when it actually changes; flat regions collapse
+        // to a run of bare block characters.
+        if (!sameColor(top, lastTop)) {
+          line += sgr(38, top);
+          lastTop = top;
+        }
+        if (!sameColor(bottom, lastBottom)) {
+          line += sgr(48, bottom);
+          lastBottom = bottom;
+        }
+        line += '▀';
       }
-      lines.push(line);
+
+      lines.push(line + RESET);
     }
 
-    return lines.join('\n');
+    return {
+      lines,
+      // The cover is square and the pane is usually wider, so centre it.
+      left: Math.max(0, Math.floor((cols - size) / 2)),
+      top: Math.max(0, Math.floor((rows - lines.length) / 2))
+    };
+  }
+
+  // blessed has no 24-bit colour path, so the art is written straight to the
+  // terminal once blessed has finished painting the frame beneath it.
+  paintAlbumArt() {
+    if (!this.art || !this.albumArt.visible) return;
+    if (!this.resultsList.hidden) return;
+
+    const program = this.screen.program;
+    const top = this.albumArt.atop + 1 + this.art.top;
+    const left = this.albumArt.aleft + 1 + this.art.left;
+
+    this.art.lines.forEach((line, index) => {
+      program.cup(top + index, left);
+      program.write(line);
+    });
   }
 
   displaySearchResults(results) {
