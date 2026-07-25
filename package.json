@@ -12,8 +12,8 @@
     "blessed": "^0.1.81",
     "blessed-contrib": "^4.11.0",
     "dotenv": "^17.4.2",
-    "image-to-ascii": "^3.3.0",
-    "open": "^11.0.0"
+    "open": "^11.0.0",
+    "sharp": "^0.35.3"
   },
   "devDependencies": {
     "nodemon": "^3.1.14"

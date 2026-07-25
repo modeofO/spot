@@ -34,6 +34,7 @@ class TerminalUI {
     this.albumArt = this.grid.set(0, 8, 4, 4, blessed.box, {
       label: 'Album Art',
       border: { type: 'line' },
+      tags: true,
       style: {
         fg: 'white',
         border: { fg: 'cyan' }
@@ -327,137 +328,53 @@ on this device to start playing music.
   }
 
   async displayImageInTerminal(imageUrl) {
-    this.log(`Attempting to display image: ${imageUrl.substring(0, 50)}...`);
-    
     try {
-      // Option 1: Try to display real image using terminal-image
-      this.log('Trying terminal-image display...');
-      await this.displayRealImage(imageUrl);
-      
+      this.albumArt.setContent(await this.renderAlbumArt(imageUrl));
     } catch (error) {
-      this.log(`terminal-image failed: ${error.message}`);
-      
-      try {
-        // Option 2: Try ASCII art conversion (requires GraphicsMagick)
-        this.log('Trying ASCII art display...');
-        await this.displayAsciiArt(imageUrl);
-        
-      } catch (asciiError) {
-        this.log(`ASCII art failed: ${asciiError.message}`);
-        // Option 3: Simple visual representation fallback
-        this.log('Using fallback display...');
-        await this.displayImageAlternative(imageUrl);
+      this.log(`Album art failed: ${error.message}`);
+      this.albumArt.setContent('\n  Album art\n  unavailable');
+    }
+    this.screen.render();
+  }
+
+  // Each cell renders two stacked pixels with the upper-half block: the top
+  // pixel becomes the foreground, the bottom one the background. That doubles
+  // vertical resolution and cancels out the roughly 2:1 aspect of a terminal
+  // cell, so a square cover stays square.
+  async renderAlbumArt(imageUrl) {
+    const sharp = require('sharp');
+
+    const response = await fetch(imageUrl);
+    if (!response.ok) {
+      throw new Error(`fetch returned ${response.status}`);
+    }
+    const source = Buffer.from(await response.arrayBuffer());
+
+    const cols = Math.max(8, (this.albumArt.width || 22) - 2);
+    const rows = Math.max(4, (this.albumArt.height || 12) - 2);
+    const size = Math.max(8, Math.min(cols, rows * 2) & ~1);
+
+    const { data, info } = await sharp(source)
+      .resize(size, size, { fit: 'fill' })
+      .removeAlpha()
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+
+    const hex = (x, y) => {
+      const i = (y * info.width + x) * info.channels;
+      return data.toString('hex', i, i + 3);
+    };
+
+    const lines = [];
+    for (let y = 0; y < size; y += 2) {
+      let line = '';
+      for (let x = 0; x < size; x++) {
+        line += `{#${hex(x, y)}-fg}{#${hex(x, y + 1)}-bg}▀{/}`;
       }
+      lines.push(line);
     }
-  }
 
-  async displayAsciiArt(imageUrl) {
-    // Try to use image-to-ascii if GraphicsMagick is available
-    const imageToAscii = require('image-to-ascii');
-    
-    return new Promise((resolve, reject) => {
-      imageToAscii(imageUrl, {
-        colored: false,
-        size: {
-          height: 16,
-          width: 32
-        }
-      }, (err, converted) => {
-        if (err) {
-          // If GraphicsMagick is not installed, throw error to use fallback
-          reject(new Error('GraphicsMagick not available'));
-        } else {
-          const formattedArt = `Album Art:\n\n${converted}`;
-          this.albumArt.setContent(formattedArt);
-          this.screen.render();
-          resolve();
-        }
-      });
-    });
-  }
-
-  async displayRealImage(imageUrl) {
-    try {
-      // Use ASCII art with better quality instead of binary image data
-      const imageToAscii = require('image-to-ascii');
-      
-      return new Promise((resolve, reject) => {
-        imageToAscii(imageUrl, {
-          colored: true,  // Enable colors for better visual
-          size: {
-            height: 16,
-            width: 30
-          },
-          chars: {
-            " ": " ",
-            ".": "░",
-            ":": "▒",
-            "-": "▓",
-            "=": "█"
-          }
-        }, (err, converted) => {
-          if (err) {
-            reject(new Error('GraphicsMagick not available or image conversion failed'));
-          } else {
-            this.albumArt.setContent(`Album Art:\n\n${converted}`);
-            this.screen.render();
-            this.log('Album art displayed successfully as colored ASCII');
-            resolve();
-          }
-        });
-      });
-      
-    } catch (error) {
-      this.log(`Failed to display real image: ${error.message}`);
-      throw error;
-    }
-  }
-
-  async displayImageAlternative(imageUrl) {
-    try {
-      // Since image-to-ascii requires GraphicsMagick/ImageMagick, let's create a simple visual representation
-      const response = await fetch(imageUrl);
-      if (response.ok) {
-        // Create a visual representation based on the album data
-        const albumDisplay = this.createSimpleAlbumDisplay(imageUrl);
-        this.albumArt.setContent(albumDisplay);
-      } else {
-        throw new Error(`Failed to fetch album art: ${response.status}`);
-      }
-    } catch (error) {
-      throw error;
-    }
-  }
-
-  createSimpleAlbumDisplay(imageUrl) {
-    // Extract some basic info and create a nice visual
-    const urlParts = imageUrl.split('/');
-    const imageId = urlParts[urlParts.length - 1] || 'unknown';
-    
-    // Create a simple but attractive album art representation using only ASCII
-    const display = `
-+----------------------------+
-|        ALBUM COVER         |
-|                            |
-|   * + * + * + * + * +      |
-|   +     > SPOTIFY <     +  |
-|   *       ALBUM ART       * |
-|   +    [O] AVAILABLE [O]  + |
-|   * + * + * + * + * +      |
-|                            |
-|   Image ID: ${imageId.substring(0, 12)}...   |
-|                            |
-|   [*] Artwork available    |
-|   [#] Multiple sizes       |
-|   [@] From Spotify API     |
-|                            |
-+----------------------------+
-
-[OK] Album art successfully loaded
-URL: ${imageUrl.substring(0, 40)}...
-    `.trim();
-
-    return display;
+    return lines.join('\n');
   }
 
   displaySearchResults(results) {
