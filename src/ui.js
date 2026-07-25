@@ -27,6 +27,38 @@ function sameColor(a, b) {
   return b !== null && a[0] === b[0] && a[1] === b[1] && a[2] === b[2];
 }
 
+const CONTROL_GROUPS = [
+  {
+    title: 'Playback',
+    keys: [
+      ['[Space]', 'Play/Pause'],
+      ['[n]/[p]', 'Next/Previous'],
+      ['[←/→]', 'Seek 10s'],
+      ['[s]/[r]', 'Shuffle/Repeat'],
+      ['[+/-]', 'Volume']
+    ]
+  },
+  {
+    title: 'Browse',
+    keys: [
+      ['[/]', 'Search'],
+      ['[l]', 'Library'],
+      ['[u]', 'Up next'],
+      ['[f]', 'Like current'],
+      ['[d]', 'Devices']
+    ]
+  },
+  {
+    title: 'In a list',
+    keys: [
+      ['[↑/↓]', 'Move'],
+      ['[Enter]', 'Play or open'],
+      ['[Esc]', 'Back'],
+      ['[q]', 'Quit']
+    ]
+  }
+];
+
 function trackEntry(track) {
   const artists = track.artists.map((artist) => artist.name).join(', ');
   return { label: `${track.name} — ${artists}`, track };
@@ -75,9 +107,9 @@ class TerminalUI {
       padding: { left: 1, right: 1, top: 1, bottom: 1 }
     });
 
-    // Six rows, not four: the renderer is height-bound, so a taller pane is
-    // the only way to get more pixels into the cover.
-    this.albumArt = this.grid.set(0, 8, 6, 4, blessed.box, {
+    // Seven rows: the renderer is height-bound, so a taller pane is the only
+    // way to get more pixels into the cover.
+    this.albumArt = this.grid.set(0, 8, 7, 4, blessed.box, {
       label: 'Album Art',
       border: { type: 'line' },
       tags: true,
@@ -87,9 +119,11 @@ class TerminalUI {
       }
     });
 
-    this.controls = this.grid.set(4, 0, 2, 8, blessed.box, {
+    this.controls = this.grid.set(4, 0, 3, 8, blessed.box, {
       label: 'Controls',
       border: { type: 'line' },
+      tags: true,
+      padding: { left: 1 },
       style: {
         fg: 'white',
         border: { fg: 'cyan' }
@@ -99,7 +133,7 @@ class TerminalUI {
 
     // contrib.gauge draws nothing at a one-row grid slot (three cells tall,
     // one of them usable), so both bars are plain boxes we fill ourselves.
-    this.progressBar = this.grid.set(6, 0, 1, 12, blessed.box, {
+    this.progressBar = this.grid.set(7, 0, 1, 12, blessed.box, {
       label: 'Progress',
       border: { type: 'line' },
       tags: true,
@@ -109,7 +143,7 @@ class TerminalUI {
       }
     });
 
-    this.volumeBar = this.grid.set(7, 0, 1, 6, blessed.box, {
+    this.volumeBar = this.grid.set(8, 0, 1, 6, blessed.box, {
       label: 'Volume',
       border: { type: 'line' },
       tags: true,
@@ -119,7 +153,7 @@ class TerminalUI {
       }
     });
 
-    this.deviceInfo = this.grid.set(7, 6, 1, 6, blessed.box, {
+    this.deviceInfo = this.grid.set(8, 6, 1, 6, blessed.box, {
       label: 'Device',
       border: { type: 'line' },
       style: {
@@ -128,7 +162,7 @@ class TerminalUI {
       }
     });
 
-    this.searchBox = this.grid.set(8, 0, 2, 12, blessed.textbox, {
+    this.searchBox = this.grid.set(9, 0, 1, 12, blessed.textbox, {
       label: 'Search (Press / to focus)',
       border: { type: 'line' },
       style: {
@@ -172,12 +206,35 @@ class TerminalUI {
     this.screen.render();
   }
 
+  // Laid out as labelled columns rather than three dense lines — the keys are
+  // easier to find when grouped by what they act on. Padding is computed from
+  // the visible text so the blessed colour tags do not skew the alignment.
   getControlsText() {
-    return `
- [Space] Play/Pause  [n] Next  [p] Previous  [←/→] Seek 10s  [s] Shuffle  [r] Repeat
- [+/-] Volume  [f] Like  [l] Library  [u] Up Next  [/] Search  [d] Devices  [q] Quit
- In a list: [↑/↓] Move  [Enter] Play  [Esc] Back
-    `.trim();
+    const width = 26;
+    const blank = ' '.repeat(width);
+
+    const columns = CONTROL_GROUPS.map(({ title, keys }, index) => {
+      const keyWidth = Math.max(...keys.map(([key]) => key.length)) + 1;
+      const isLast = index === CONTROL_GROUPS.length - 1;
+
+      // `visible` is the untagged text, so the column padding stays correct.
+      const cell = (visible, tagged) =>
+        tagged + (isLast ? '' : ' '.repeat(Math.max(1, width - visible.length)));
+
+      return [
+        cell(title, `{cyan-fg}{bold}${title}{/bold}{/cyan-fg}`),
+        ...keys.map(([key, action]) => {
+          const gap = ' '.repeat(keyWidth - key.length);
+          return cell(key + gap + action, `{yellow-fg}${key}{/yellow-fg}${gap}${action}`);
+        })
+      ];
+    });
+
+    const height = Math.max(...columns.map((column) => column.length));
+
+    return Array.from({ length: height }, (unused, row) =>
+      columns.map((column) => column[row] ?? blank).join('').trimEnd()
+    ).join('\n');
   }
 
   // Global shortcuts fire regardless of focus, so typing "n" in the search box
