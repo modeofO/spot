@@ -79,6 +79,18 @@ so the file is rewritten each time.
 | `d` | Show available devices |
 | `q` | Quit |
 
+In the search results list:
+
+| Key | Action |
+|-----|--------|
+| `↑` / `↓` (or `j` / `k`) | Move selection |
+| `Enter` | Play the selected track |
+| `Esc` | Close the list |
+
+Volume keys only work on devices that accept remote volume control. Phones
+usually report `supports_volume: false`, and Spotify rejects the request with
+`403 Cannot control device volume`; change the volume on the device itself.
+
 ## Interface
 
 The terminal interface is divided into several sections:

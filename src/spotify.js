@@ -71,9 +71,17 @@ class SpotifyAPI {
     return await this.request('/me/player/currently-playing');
   }
 
-  async play(deviceId = null) {
+  async play({ deviceId = null, uris = null, contextUri = null } = {}) {
     const endpoint = deviceId ? `/me/player/play?device_id=${deviceId}` : '/me/player/play';
-    await this.request(endpoint, 'PUT');
+
+    let body = null;
+    if (uris) {
+      body = { uris };
+    } else if (contextUri) {
+      body = { context_uri: contextUri };
+    }
+
+    await this.request(endpoint, 'PUT', body);
     return true;
   }
 

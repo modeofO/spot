@@ -31,7 +31,9 @@ class TerminalUI {
       padding: { left: 1, right: 1, top: 1, bottom: 1 }
     });
 
-    this.albumArt = this.grid.set(0, 8, 4, 4, blessed.box, {
+    // Six rows, not four: the renderer is height-bound, so a taller pane is
+    // the only way to get more pixels into the cover.
+    this.albumArt = this.grid.set(0, 8, 6, 4, blessed.box, {
       label: 'Album Art',
       border: { type: 'line' },
       tags: true,
@@ -41,7 +43,7 @@ class TerminalUI {
       }
     });
 
-    this.controls = this.grid.set(4, 0, 2, 12, blessed.box, {
+    this.controls = this.grid.set(4, 0, 2, 8, blessed.box, {
       label: 'Controls',
       border: { type: 'line' },
       style: {
@@ -103,6 +105,24 @@ class TerminalUI {
       alwaysScroll: true
     });
 
+    this.resultsList = blessed.list({
+      parent: this.screen,
+      label: 'Search Results — Enter to play, Esc to close',
+      border: { type: 'line' },
+      top: 'center',
+      left: 'center',
+      width: '70%',
+      height: '50%',
+      hidden: true,
+      keys: true,
+      vi: true,
+      style: {
+        fg: 'white',
+        border: { fg: 'yellow' },
+        selected: { bg: 'green', fg: 'black' }
+      }
+    });
+
     this.screen.render();
   }
 
@@ -110,115 +130,134 @@ class TerminalUI {
     return `
  [Space] Play/Pause  [n] Next  [p] Previous  [s] Shuffle  [r] Repeat
  [+/-] Volume  [/] Search  [d] Devices  [q] Quit
+ In search results: [↑/↓] Move  [Enter] Play  [Esc] Close
     `.trim();
+  }
+
+  // Global shortcuts fire regardless of focus, so typing "n" in the search box
+  // used to skip the track. Suppress them whenever a widget owns the keyboard.
+  isCapturingInput() {
+    return this.screen.focused === this.searchBox || !this.resultsList.hidden;
+  }
+
+  bindKey(keys, handler) {
+    this.screen.key(keys, async () => {
+      if (this.isCapturingInput()) return;
+      try {
+        await handler();
+      } catch (error) {
+        this.log(`Error: ${error.message}`);
+      }
+    });
   }
 
   setupKeybindings() {
     this.screen.key(['q', 'C-c'], () => {
+      if (this.isCapturingInput()) return;
       return process.exit(0);
     });
 
-    this.screen.key('space', async () => {
-      try {
-        if (this.playbackState?.is_playing) {
-          await this.spotify.pause();
-          this.log('Paused playback');
-        } else {
-          await this.spotify.play();
-          this.log('Resumed playback');
-        }
-      } catch (error) {
-        this.log(`Error: ${error.message}`);
+    this.bindKey('space', async () => {
+      if (this.playbackState?.is_playing) {
+        await this.spotify.pause();
+        this.log('Paused playback');
+      } else {
+        await this.spotify.play();
+        this.log('Resumed playback');
       }
     });
 
-    this.screen.key('n', async () => {
-      try {
-        await this.spotify.next();
-        this.log('Skipped to next track');
-      } catch (error) {
-        this.log(`Error: ${error.message}`);
-      }
+    this.bindKey('n', async () => {
+      await this.spotify.next();
+      this.log('Skipped to next track');
     });
 
-    this.screen.key('p', async () => {
-      try {
-        await this.spotify.previous();
-        this.log('Skipped to previous track');
-      } catch (error) {
-        this.log(`Error: ${error.message}`);
-      }
+    this.bindKey('p', async () => {
+      await this.spotify.previous();
+      this.log('Skipped to previous track');
     });
 
-    this.screen.key('s', async () => {
-      try {
-        const newState = !this.playbackState?.shuffle_state;
-        await this.spotify.setShuffle(newState);
-        this.log(`Shuffle ${newState ? 'enabled' : 'disabled'}`);
-      } catch (error) {
-        this.log(`Error: ${error.message}`);
-      }
+    this.bindKey('s', async () => {
+      const newState = !this.playbackState?.shuffle_state;
+      await this.spotify.setShuffle(newState);
+      this.log(`Shuffle ${newState ? 'enabled' : 'disabled'}`);
     });
 
-    this.screen.key('r', async () => {
-      try {
-        const currentRepeat = this.playbackState?.repeat_state || 'off';
-        const nextRepeat = currentRepeat === 'off' ? 'context' : 
-                          currentRepeat === 'context' ? 'track' : 'off';
-        await this.spotify.setRepeat(nextRepeat);
-        this.log(`Repeat mode: ${nextRepeat}`);
-      } catch (error) {
-        this.log(`Error: ${error.message}`);
-      }
+    this.bindKey('r', async () => {
+      const currentRepeat = this.playbackState?.repeat_state || 'off';
+      const nextRepeat = currentRepeat === 'off' ? 'context' :
+                        currentRepeat === 'context' ? 'track' : 'off';
+      await this.spotify.setRepeat(nextRepeat);
+      this.log(`Repeat mode: ${nextRepeat}`);
     });
 
-    this.screen.key(['+', '='], async () => {
-      try {
-        const currentVolume = this.playbackState?.device?.volume_percent || 50;
-        const newVolume = Math.min(100, currentVolume + 10);
-        await this.spotify.setVolume(newVolume);
-        this.log(`Volume: ${newVolume}%`);
-      } catch (error) {
-        this.log(`Error: ${error.message}`);
-      }
-    });
+    this.bindKey(['+', '='], () => this.changeVolume(10));
+    this.bindKey('-', () => this.changeVolume(-10));
 
-    this.screen.key('-', async () => {
-      try {
-        const currentVolume = this.playbackState?.device?.volume_percent || 50;
-        const newVolume = Math.max(0, currentVolume - 10);
-        await this.spotify.setVolume(newVolume);
-        this.log(`Volume: ${newVolume}%`);
-      } catch (error) {
-        this.log(`Error: ${error.message}`);
-      }
-    });
-
-    this.screen.key('/', () => {
+    this.bindKey('/', () => {
       this.searchBox.focus();
     });
 
     this.searchBox.on('submit', async (text) => {
-      if (text.trim()) {
-        try {
-          const results = await this.spotify.search(text.trim());
-          this.displaySearchResults(results);
-        } catch (error) {
-          this.log(`Search error: ${error.message}`);
-        }
-      }
       this.searchBox.clearValue();
+      this.logBox.focus(); // release the keyboard so global shortcuts work again
+      this.screen.render();
+      if (!text.trim()) return;
+
+      try {
+        const results = await this.spotify.search(text.trim());
+        this.displaySearchResults(results);
+      } catch (error) {
+        this.log(`Search error: ${error.message}`);
+      }
+    });
+
+    this.searchBox.key('escape', () => {
+      this.searchBox.cancel();
       this.screen.render();
     });
 
-    this.screen.key('d', async () => {
+    this.resultsList.on('select', async (item, index) => {
+      const track = this.searchResults?.[index];
+      this.closeResults();
+      if (!track) return;
+
       try {
-        const devices = await this.spotify.getDevices();
-        this.displayDevices(devices);
+        await this.spotify.play({ uris: [track.uri] });
+        this.log(`Playing: ${track.name}`);
+        setTimeout(() => this.updateTrackInfo(), 500);
       } catch (error) {
-        this.log(`Error getting devices: ${error.message}`);
+        this.log(`Error: ${error.message}`);
       }
     });
+
+    this.resultsList.key(['escape', 'q'], () => this.closeResults());
+
+    this.bindKey('d', async () => {
+      const devices = await this.spotify.getDevices();
+      this.displayDevices(devices);
+    });
+  }
+
+  async changeVolume(delta) {
+    const device = this.playbackState?.device;
+
+    // Phones and speakers routinely refuse remote volume changes; Spotify
+    // advertises this up front, so check before eating a 403.
+    if (device && device.supports_volume === false) {
+      this.log(`${device.name} does not accept remote volume control — use the device itself`);
+      return;
+    }
+
+    const current = device?.volume_percent ?? 50;
+    const target = Math.min(100, Math.max(0, current + delta));
+    await this.spotify.setVolume(target);
+    this.log(`Volume: ${target}%`);
+  }
+
+  closeResults() {
+    this.resultsList.hide();
+    this.screen.render();
   }
 
   async updateTrackInfo() {
@@ -245,6 +284,7 @@ The player will automatically detect playback once started.
         `.trim());
         this.albumArt.setContent('No album art');
         this.deviceInfo.setContent('No active device');
+        this.progressAnchor = null;
         this.setBar(this.progressBar, 0, '', 'green');
         this.setBar(this.volumeBar, 0, '', 'blue');
         this.screen.render();
@@ -271,10 +311,14 @@ Repeat: ${playbackState?.repeat_state || 'Off'}
 
         this.trackInfo.setContent(trackText);
 
-        if (playbackState?.progress_ms && track.duration_ms) {
-          const progress = (playbackState.progress_ms / track.duration_ms) * 100;
-          const elapsed = this.formatTime(playbackState.progress_ms);
-          this.setBar(this.progressBar, progress, `${elapsed} / ${this.formatTime(track.duration_ms)}`, 'green');
+        if (playbackState?.progress_ms !== undefined && track.duration_ms) {
+          this.progressAnchor = {
+            ms: playbackState.progress_ms,
+            duration: track.duration_ms,
+            at: Date.now(),
+            playing: !!playbackState.is_playing
+          };
+          this.renderProgress();
         }
 
         if (playbackState?.device?.volume_percent !== undefined) {
@@ -393,17 +437,22 @@ on this device to start playing music.
   }
 
   displaySearchResults(results) {
-    if (results.tracks?.items?.length > 0) {
-      const tracks = results.tracks.items.slice(0, 5);
-      let searchText = 'Search Results:\n\n';
-      tracks.forEach((track, index) => {
-        const artists = track.artists.map(a => a.name).join(', ');
-        searchText += `${index + 1}. ${track.name} - ${artists}\n`;
-      });
-      this.log(searchText);
-    } else {
+    const tracks = results.tracks?.items || [];
+
+    if (tracks.length === 0) {
       this.log('No search results found');
+      return;
     }
+
+    this.searchResults = tracks;
+    this.resultsList.setItems(tracks.map((track, index) => {
+      const artists = track.artists.map(a => a.name).join(', ');
+      return `${String(index + 1).padStart(2)}. ${track.name} — ${artists}`;
+    }));
+    this.resultsList.select(0);
+    this.resultsList.show();
+    this.resultsList.focus();
+    this.screen.render();
   }
 
   displayDevices(devices) {
@@ -441,11 +490,31 @@ on this device to start playing music.
     this.screen.render();
   }
 
+  // Extrapolate between polls so the bar moves every second instead of jumping
+  // once per API round trip.
+  renderProgress() {
+    const anchor = this.progressAnchor;
+    if (!anchor) return;
+
+    const drift = anchor.playing ? Date.now() - anchor.at : 0;
+    const elapsed = Math.min(anchor.duration, anchor.ms + drift);
+    const percent = (elapsed / anchor.duration) * 100;
+
+    this.setBar(
+      this.progressBar,
+      percent,
+      `${this.formatTime(elapsed)} / ${this.formatTime(anchor.duration)}`,
+      'green'
+    );
+  }
+
   startUpdateLoop() {
     this.updateTrackInfo();
+    setInterval(() => this.updateTrackInfo(), 5000);
     setInterval(() => {
-      this.updateTrackInfo();
-    }, 10000); // Reduced from 2s to 10s to avoid excessive API calls
+      this.renderProgress();
+      this.screen.render();
+    }, 1000);
   }
 
   render() {
