@@ -33,12 +33,6 @@ A beautiful terminal-based Spotify music player that lets you control your music
 bun install
 ```
 
-Album art rendering shells out to GraphicsMagick:
-
-```bash
-brew install graphicsmagick
-```
-
 ### 3. Configure Environment
 
 1. Copy the example environment file:
@@ -101,9 +95,8 @@ The terminal interface is divided into several sections:
 ## Requirements
 
 - Node.js 18 or higher (the Spotify client uses global `fetch`)
-- GraphicsMagick (`brew install graphicsmagick`) for album art
 - Active Spotify Premium account (required for playback control)
-- Terminal that supports 256 colors for best experience
+- Terminal that supports 256 colors and Unicode block characters
 
 ## Troubleshooting
 
@@ -119,8 +112,9 @@ The terminal interface is divided into several sections:
 - `Port 8888 is already in use` — free the port or change `PORT` in `.env` (and the dashboard)
 
 ### Album art not displaying
-- Ensure your terminal supports images or has good Unicode support
-- Some terminals may show ASCII art instead of actual images
+- Covers are drawn with half-block characters (`▀`) and 256-color output; your
+  terminal needs both
+- Check the log pane for the underlying error (usually a failed image fetch)
 
 ## License
 
