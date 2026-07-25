@@ -51,16 +51,26 @@ class TerminalUI {
       content: this.getControlsText()
     });
 
-    this.progressBar = this.grid.set(6, 0, 1, 12, contrib.gauge, {
+    // contrib.gauge draws nothing at a one-row grid slot (three cells tall,
+    // one of them usable), so both bars are plain boxes we fill ourselves.
+    this.progressBar = this.grid.set(6, 0, 1, 12, blessed.box, {
       label: 'Progress',
-      stroke: 'green',
-      fill: 'white'
+      border: { type: 'line' },
+      tags: true,
+      style: {
+        fg: 'white',
+        border: { fg: 'cyan' }
+      }
     });
 
-    this.volumeBar = this.grid.set(7, 0, 1, 6, contrib.gauge, {
+    this.volumeBar = this.grid.set(7, 0, 1, 6, blessed.box, {
       label: 'Volume',
-      stroke: 'blue',
-      fill: 'white'
+      border: { type: 'line' },
+      tags: true,
+      style: {
+        fg: 'white',
+        border: { fg: 'cyan' }
+      }
     });
 
     this.deviceInfo = this.grid.set(7, 6, 1, 6, blessed.box, {
@@ -235,8 +245,8 @@ The player will automatically detect playback once started.
         `.trim());
         this.albumArt.setContent('No album art');
         this.deviceInfo.setContent('No active device');
-        this.progressBar.setPercent(0);
-        this.volumeBar.setPercent(0);
+        this.setBar(this.progressBar, 0, '', 'green');
+        this.setBar(this.volumeBar, 0, '', 'blue');
         this.screen.render();
         return;
       }
@@ -263,11 +273,13 @@ Repeat: ${playbackState?.repeat_state || 'Off'}
 
         if (playbackState?.progress_ms && track.duration_ms) {
           const progress = (playbackState.progress_ms / track.duration_ms) * 100;
-          this.progressBar.setPercent(progress);
+          const elapsed = this.formatTime(playbackState.progress_ms);
+          this.setBar(this.progressBar, progress, `${elapsed} / ${this.formatTime(track.duration_ms)}`, 'green');
         }
 
         if (playbackState?.device?.volume_percent !== undefined) {
-          this.volumeBar.setPercent(playbackState.device.volume_percent);
+          const volume = playbackState.device.volume_percent;
+          this.setBar(this.volumeBar, volume, `${volume}%`, 'blue');
         }
 
         if (playbackState?.device) {
@@ -365,9 +377,12 @@ on this device to start playing music.
       return data.toString('hex', i, i + 3);
     };
 
+    // The cover is square, so it rarely fills a wider box — centre it.
+    const pad = ' '.repeat(Math.max(0, Math.floor((cols - size) / 2)));
+
     const lines = [];
     for (let y = 0; y < size; y += 2) {
-      let line = '';
+      let line = pad;
       for (let x = 0; x < size; x++) {
         line += `{#${hex(x, y)}-fg}{#${hex(x, y + 1)}-bg}▀{/}`;
       }
@@ -402,6 +417,17 @@ on this device to start playing music.
     } else {
       this.log('No devices found');
     }
+  }
+
+  setBar(box, percent, label, color) {
+    const suffix = label ? ` ${label}` : '';
+    const width = Math.max(4, (box.width || 20) - 2 - suffix.length);
+    const ratio = Math.min(100, Math.max(0, percent)) / 100;
+    const filled = Math.round(ratio * width);
+
+    box.setContent(
+      `{${color}-fg}${'█'.repeat(filled)}{/}${'░'.repeat(width - filled)}${suffix}`
+    );
   }
 
   formatTime(ms) {
