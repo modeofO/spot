@@ -21,13 +21,22 @@ A beautiful terminal-based Spotify music player that lets you control your music
 3. Fill in the details:
    - App name: `Spot Terminal Player`
    - App description: `Terminal-based Spotify player`
-   - Redirect URI: `http://localhost:8888/callback`
+   - Redirect URI: `http://127.0.0.1:8888/callback`
 4. Save your `Client ID` and `Client Secret`
+
+> Spotify stopped accepting `localhost` as a redirect URI on 2025-04-09. Loopback
+> redirects must use a literal IP (`127.0.0.1` or `[::1]`); everything else must be HTTPS.
 
 ### 2. Install Dependencies
 
 ```bash
-npm install
+bun install
+```
+
+Album art rendering shells out to GraphicsMagick:
+
+```bash
+brew install graphicsmagick
 ```
 
 ### 3. Configure Environment
@@ -41,20 +50,25 @@ npm install
    ```
    SPOTIFY_CLIENT_ID=your_spotify_client_id_here
    SPOTIFY_CLIENT_SECRET=your_spotify_client_secret_here
-   REDIRECT_URI=http://localhost:8888/callback
+   REDIRECT_URI=http://127.0.0.1:8888/callback
    PORT=8888
    ```
+
+`REDIRECT_URI` must match the one registered in the Spotify dashboard exactly.
 
 ### 4. Run the Application
 
 ```bash
-npm start
+bun start
 ```
 
 On first run, the app will:
-1. Open your browser for Spotify authentication
-2. Ask for permission to control your Spotify playback
-3. Save the authentication token for future use
+1. Start a one-shot loopback server on `127.0.0.1:8888`
+2. Open your browser for Spotify authentication
+3. Catch the callback, exchange the code (PKCE), and save the token to `.spotify_token`
+
+Tokens refresh automatically. Spotify rotates the refresh token on every refresh,
+so the file is rewritten each time.
 
 ## Controls
 
@@ -86,7 +100,8 @@ The terminal interface is divided into several sections:
 
 ## Requirements
 
-- Node.js 14 or higher
+- Node.js 18 or higher (the Spotify client uses global `fetch`)
+- GraphicsMagick (`brew install graphicsmagick`) for album art
 - Active Spotify Premium account (required for playback control)
 - Terminal that supports 256 colors for best experience
 
@@ -99,8 +114,9 @@ The terminal interface is divided into several sections:
 
 ### Authentication issues
 - Check your Client ID and Client Secret in `.env`
-- Make sure the redirect URI matches exactly: `http://localhost:8888/callback`
-- Delete `.spotify_token` file and re-authenticate
+- Make sure the redirect URI matches exactly: `http://127.0.0.1:8888/callback`
+- `Refresh token revoked` — delete `.spotify_token` and re-authenticate
+- `Port 8888 is already in use` — free the port or change `PORT` in `.env` (and the dashboard)
 
 ### Album art not displaying
 - Ensure your terminal supports images or has good Unicode support
