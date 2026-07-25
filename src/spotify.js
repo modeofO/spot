@@ -71,7 +71,7 @@ class SpotifyAPI {
     return await this.request('/me/player/currently-playing');
   }
 
-  async play({ deviceId = null, uris = null, contextUri = null } = {}) {
+  async play({ deviceId = null, uris = null, contextUri = null, offset = null } = {}) {
     const endpoint = deviceId ? `/me/player/play?device_id=${deviceId}` : '/me/player/play';
 
     let body = null;
@@ -79,6 +79,12 @@ class SpotifyAPI {
       body = { uris };
     } else if (contextUri) {
       body = { context_uri: contextUri };
+    }
+
+    // Starting from a context keeps the rest of the playlist queued behind the
+    // chosen track, which a bare uris list does not.
+    if (body && offset !== null) {
+      body.offset = typeof offset === 'number' ? { position: offset } : { uri: offset };
     }
 
     await this.request(endpoint, 'PUT', body);
@@ -135,12 +141,21 @@ class SpotifyAPI {
     return await this.request(`/search?${params.toString()}`);
   }
 
-  async getUserPlaylists(limit = 20) {
+  async getUserPlaylists(limit = 50) {
     return await this.request(`/me/playlists?limit=${limit}`);
   }
 
-  async getPlaylistTracks(playlistId, limit = 50) {
+  async getPlaylistTracks(playlistId, limit = 100) {
     return await this.request(`/playlists/${playlistId}/tracks?limit=${limit}`);
+  }
+
+  async getSavedTracks(limit = 50) {
+    return await this.request(`/me/tracks?limit=${limit}`);
+  }
+
+  async addToQueue(uri) {
+    await this.request(`/me/player/queue?uri=${encodeURIComponent(uri)}`, 'POST');
+    return true;
   }
 
   async testConnection() {

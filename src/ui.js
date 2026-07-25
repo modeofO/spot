@@ -27,6 +27,11 @@ function sameColor(a, b) {
   return b !== null && a[0] === b[0] && a[1] === b[1] && a[2] === b[2];
 }
 
+function trackEntry(track) {
+  const artists = track.artists.map((artist) => artist.name).join(', ');
+  return { label: `${track.name} — ${artists}`, track };
+}
+
 class TerminalUI {
   constructor(spotifyAPI) {
     this.spotify = spotifyAPI;
@@ -39,6 +44,7 @@ class TerminalUI {
     this.playbackState = null;
     this.lastAlbumId = null; // Track the last album to avoid reloading same art
     this.art = null;
+    this.pickerStack = [];
 
     // Repaint the cover after every frame; blessed draws the pane empty and
     // knows nothing about the raw escape sequences layered on top of it.
@@ -143,17 +149,19 @@ class TerminalUI {
       alwaysScroll: true
     });
 
-    this.resultsList = blessed.list({
+    // One overlay serves search results, the library and playlist contents;
+    // pickerStack keeps the trail so Esc walks back a level at a time.
+    this.picker = blessed.list({
       parent: this.screen,
-      label: 'Search Results — Enter to play, Esc to close',
       border: { type: 'line' },
       top: 'center',
       left: 'center',
       width: '70%',
-      height: '50%',
+      height: '60%',
       hidden: true,
       keys: true,
       vi: true,
+      scrollable: true,
       style: {
         fg: 'white',
         border: { fg: 'yellow' },
@@ -167,15 +175,15 @@ class TerminalUI {
   getControlsText() {
     return `
  [Space] Play/Pause  [n] Next  [p] Previous  [s] Shuffle  [r] Repeat
- [+/-] Volume  [/] Search  [d] Devices  [q] Quit
- In search results: [↑/↓] Move  [Enter] Play  [Esc] Close
+ [+/-] Volume  [l] Library  [/] Search  [d] Devices  [q] Quit
+ In a list: [↑/↓] Move  [Enter] Play  [Esc] Back
     `.trim();
   }
 
   // Global shortcuts fire regardless of focus, so typing "n" in the search box
   // used to skip the track. Suppress them whenever a widget owns the keyboard.
   isCapturingInput() {
-    return this.screen.focused === this.searchBox || !this.resultsList.hidden;
+    return this.screen.focused === this.searchBox || !this.picker.hidden;
   }
 
   bindKey(keys, handler) {
@@ -255,26 +263,126 @@ class TerminalUI {
       this.screen.render();
     });
 
-    this.resultsList.on('select', async (item, index) => {
-      const track = this.searchResults?.[index];
-      this.closeResults();
-      if (!track) return;
+    this.picker.on('select', async (item, index) => {
+      const frame = this.pickerStack[this.pickerStack.length - 1];
+      if (!frame) return;
 
       try {
-        await this.spotify.play({ uris: [track.uri] });
-        this.log(`Playing: ${track.name}`);
-        setTimeout(() => this.updateTrackInfo(), 500);
+        await frame.onSelect(frame.items[index], index);
       } catch (error) {
         this.log(`Error: ${error.message}`);
       }
     });
 
-    this.resultsList.key(['escape', 'q'], () => this.closeResults());
+    this.picker.key('escape', () => this.popPicker());
+    this.picker.key('q', () => this.closePicker());
+
+    this.bindKey('l', () => this.openLibrary());
 
     this.bindKey('d', async () => {
       const devices = await this.spotify.getDevices();
       this.displayDevices(devices);
     });
+  }
+
+  openPicker(title, items, onSelect) {
+    if (items.length === 0) {
+      this.log(`${title}: nothing to show`);
+      return;
+    }
+
+    this.pickerStack.push({ title, items, onSelect });
+    this.showPicker();
+  }
+
+  showPicker() {
+    const frame = this.pickerStack[this.pickerStack.length - 1];
+    if (!frame) {
+      this.closePicker();
+      return;
+    }
+
+    const back = this.pickerStack.length > 1 ? 'Esc back' : 'Esc close';
+    this.picker.setLabel(` ${frame.title} — Enter to play, ${back} `);
+    this.picker.setItems(frame.items.map((item) => item.label));
+    this.picker.select(0);
+    this.picker.show();
+    this.picker.setFront();
+    this.picker.focus();
+    this.screen.render();
+  }
+
+  popPicker() {
+    this.pickerStack.pop();
+    if (this.pickerStack.length > 0) {
+      this.showPicker();
+    } else {
+      this.closePicker();
+    }
+  }
+
+  closePicker() {
+    this.pickerStack = [];
+    this.picker.hide();
+    this.artDirty = true; // the overlay covered the pane
+    this.logBox.focus();
+    this.screen.render();
+  }
+
+  async openLibrary() {
+    this.log('Loading your library...');
+    const playlists = await this.spotify.getUserPlaylists();
+
+    const items = [
+      { label: 'Liked Songs', liked: true },
+      ...(playlists.items || [])
+        .filter(Boolean)
+        .map((playlist) => ({
+          label: `${playlist.name}  (${playlist.tracks?.total ?? '?'} tracks)`,
+          playlist
+        }))
+    ];
+
+    this.openPicker('Your Library', items, (item) => this.openCollection(item));
+  }
+
+  async openCollection(entry) {
+    if (entry.liked) {
+      const saved = await this.spotify.getSavedTracks();
+      const tracks = (saved.items || []).map((item) => item.track).filter(Boolean);
+
+      // Liked Songs has no playable context URI, so hand Spotify the selected
+      // track plus everything after it to keep a queue behind it.
+      this.openPicker('Liked Songs', tracks.map(trackEntry), (item, index) =>
+        this.playTracks(tracks.slice(index, index + 50).map((track) => track.uri), item.track)
+      );
+      return;
+    }
+
+    const playlist = entry.playlist;
+    const page = await this.spotify.getPlaylistTracks(playlist.id);
+    const tracks = (page.items || []).map((item) => item.track).filter(Boolean);
+
+    // A context URI plus an offset leaves the rest of the playlist queued.
+    this.openPicker(playlist.name, tracks.map(trackEntry), (item, index) =>
+      this.playContext(playlist.uri, index, item.track)
+    );
+  }
+
+  async playTracks(uris, track) {
+    await this.spotify.play({ uris });
+    this.afterPlay(track);
+  }
+
+  async playContext(contextUri, offset, track) {
+    await this.spotify.play({ contextUri, offset });
+    this.afterPlay(track);
+  }
+
+  afterPlay(track) {
+    this.closePicker();
+    this.log(`Playing: ${track.name}`);
+    setTimeout(() => this.updateTrackInfo(), 500);
   }
 
   async changeVolume(delta) {
@@ -300,12 +408,6 @@ class TerminalUI {
 
     await this.spotify.setVolume(target);
     this.log(`Volume: ${target}%`);
-  }
-
-  closeResults() {
-    this.resultsList.hide();
-    this.artDirty = true; // the overlay covered the pane
-    this.screen.render();
   }
 
   async updateTrackInfo() {
@@ -565,7 +667,7 @@ on this device to start playing music.
   // moves included, directly to the output.
   paintAlbumArt() {
     if (!this.art || !this.albumArt.visible) return;
-    if (!this.resultsList.hidden) return;
+    if (!this.picker.hidden) return;
 
     const program = this.screen.program;
     program.flush();
@@ -608,15 +710,9 @@ on this device to start playing music.
       return;
     }
 
-    this.searchResults = tracks;
-    this.resultsList.setItems(tracks.map((track, index) => {
-      const artists = track.artists.map(a => a.name).join(', ');
-      return `${String(index + 1).padStart(2)}. ${track.name} — ${artists}`;
-    }));
-    this.resultsList.select(0);
-    this.resultsList.show();
-    this.resultsList.focus();
-    this.screen.render();
+    this.openPicker('Search Results', tracks.map(trackEntry), (item) =>
+      this.playTracks([item.track.uri], item.track)
+    );
   }
 
   displayDevices(devices) {

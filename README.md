@@ -75,17 +75,22 @@ so the file is rewritten each time.
 | `r` | Cycle repeat mode (off → context → track → off) |
 | `+` / `=` | Increase volume |
 | `-` | Decrease volume |
+| `l` | Browse your library (Liked Songs + playlists) |
 | `/` | Focus search box |
 | `d` | Show available devices |
 | `q` | Quit |
 
-In the search results list:
+In any list (library, playlist contents, search results):
 
 | Key | Action |
 |-----|--------|
 | `↑` / `↓` (or `j` / `k`) | Move selection |
-| `Enter` | Play the selected track |
-| `Esc` | Close the list |
+| `Enter` | Open the playlist, or play the track |
+| `Esc` | Go back one level, or close |
+
+Playing a track from a playlist starts the playlist at that track, so the rest
+stays queued behind it. Liked Songs has no playable context URI, so the selected
+track and the next 50 are queued explicitly.
 
 Volume keys only work on devices that accept remote volume control. Phones
 usually report `supports_volume: false`, and Spotify rejects the request with
