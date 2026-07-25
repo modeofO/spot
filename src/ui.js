@@ -4,6 +4,12 @@ const contrib = require('blessed-contrib');
 const RESET = '\x1b[0m';
 const TRUECOLOR = /^(truecolor|24bit)$/i.test(process.env.COLORTERM || '');
 
+// Terminal font size is global, so a pane cannot use smaller text to get more
+// detail. iTerm2's inline image protocol sidesteps the cell grid entirely.
+// Set SPOT_ART=blocks to force the half-block renderer.
+const INLINE_IMAGES = process.env.SPOT_ART !== 'blocks' &&
+  (process.env.LC_TERMINAL === 'iTerm2' || process.env.TERM_PROGRAM === 'iTerm.app');
+
 // Nearest entry in the xterm 6x6x6 colour cube, used when the terminal has not
 // advertised 24-bit colour.
 function xterm256(r, g, b) {
@@ -37,6 +43,13 @@ class TerminalUI {
     // Repaint the cover after every frame; blessed draws the pane empty and
     // knows nothing about the raw escape sequences layered on top of it.
     this.screen.on('render', () => this.paintAlbumArt());
+
+    // The cover is rendered for a specific pane size, so a resize invalidates
+    // it; clearing lastAlbumId makes the next poll fetch and re-render it.
+    this.screen.on('resize', () => {
+      this.art = null;
+      this.lastAlbumId = null;
+    });
 
     this.setupUI();
     this.setupKeybindings();
@@ -291,21 +304,22 @@ class TerminalUI {
 
   closeResults() {
     this.resultsList.hide();
+    this.artDirty = true; // the overlay covered the pane
     this.screen.render();
   }
 
   async updateTrackInfo() {
     try {
-      const [playbackState, currentTrack] = await Promise.all([
-        this.spotify.getCurrentPlayback(),
-        this.spotify.getCurrentTrack()
-      ]);
+      // /me/player already carries the track, so the extra
+      // /me/player/currently-playing call was doubling the request rate for
+      // nothing.
+      const playbackState = await this.spotify.getCurrentPlayback();
 
       this.playbackState = playbackState;
-      this.currentTrack = currentTrack;
+      this.currentTrack = playbackState;
 
       // Handle case where no device is active or no track is playing
-      if (!playbackState && !currentTrack) {
+      if (!playbackState) {
         this.trackInfo.setContent(`
 No active Spotify device found.
 
@@ -326,8 +340,8 @@ The player will automatically detect playback once started.
         return;
       }
 
-      if (currentTrack?.item) {
-        const track = currentTrack.item;
+      if (playbackState.item) {
+        const track = playbackState.item;
         const artists = track.artists.map(a => a.name).join(', ');
         const albumName = track.album.name;
         const trackName = track.name;
@@ -431,6 +445,7 @@ on this device to start playing music.
   async displayImageInTerminal(imageUrl) {
     try {
       this.art = await this.renderAlbumArt(imageUrl);
+      this.artDirty = true;
       this.albumArt.setContent('');
     } catch (error) {
       this.art = null;
@@ -440,17 +455,10 @@ on this device to start playing music.
     this.screen.render();
   }
 
-  // Each cell renders two stacked pixels with the upper-half block: the top
-  // pixel becomes the foreground, the bottom one the background. That doubles
-  // vertical resolution and cancels out the roughly 2:1 aspect of a terminal
-  // cell, so a square cover stays square.
-  //
-  // blessed quantises every colour to the 256-colour palette, which turns any
-  // gradient into visible banding, so the rows are emitted as raw SGR and
-  // painted over the pane after blessed has drawn (see paintAlbumArt).
+  // Blocks cap out at one cell = 1x2 pixels, which is why the cover looks
+  // coarse no matter how large the pane is. iTerm2 can draw a real image into
+  // a cell region instead, at whatever resolution the pane is worth.
   async renderAlbumArt(imageUrl) {
-    const sharp = require('sharp');
-
     const response = await fetch(imageUrl);
     if (!response.ok) {
       throw new Error(`fetch returned ${response.status}`);
@@ -460,6 +468,50 @@ on this device to start playing music.
     const cols = Math.max(8, (this.albumArt.width || 22) - 2);
     const rows = Math.max(4, (this.albumArt.height || 12) - 2);
     const size = Math.max(8, Math.min(cols, rows * 2) & ~1);
+    const left = Math.max(0, Math.floor((cols - size) / 2));
+    const top = Math.max(0, Math.floor((rows - size / 2) / 2));
+
+    const art = INLINE_IMAGES
+      ? await this.renderInlineImage(source, size)
+      : await this.renderBlocks(source, size);
+
+    return { ...art, left, top };
+  }
+
+  // iTerm2's inline image protocol: the terminal scales the image into the
+  // given cell box itself, so the only limit is the pane size in pixels.
+  async renderInlineImage(source, size) {
+    const sharp = require('sharp');
+
+    const encoded = await sharp(source)
+      .resize(Math.min(600, size * 12), Math.min(600, size * 12), { fit: 'fill', kernel: 'lanczos3' })
+      .jpeg({ quality: 85 })
+      .toBuffer();
+
+    const args = [
+      'inline=1',
+      `size=${encoded.length}`,
+      `width=${size}`,
+      `height=${size / 2}`,
+      'preserveAspectRatio=1'
+    ].join(';');
+
+    return {
+      rows: size / 2,
+      payload: `\x1b]1337;File=${args}:${encoded.toString('base64')}\x07`
+    };
+  }
+
+  // Fallback for everything else. Each cell renders two stacked pixels with the
+  // upper-half block: the top pixel becomes the foreground, the bottom one the
+  // background. That doubles vertical resolution and cancels out the roughly
+  // 2:1 aspect of a terminal cell, so a square cover stays square.
+  //
+  // blessed quantises every colour to the 256-colour palette, which turns any
+  // gradient into visible banding, so rows are emitted as raw SGR and painted
+  // over the pane after blessed has drawn (see paintAlbumArt).
+  async renderBlocks(source, size) {
+    const sharp = require('sharp');
 
     const { data, info } = await sharp(source)
       .resize(size, size, { fit: 'fill', kernel: 'lanczos3' })
@@ -498,28 +550,54 @@ on this device to start playing music.
       lines.push(line + RESET);
     }
 
-    return {
-      lines,
-      // The cover is square and the pane is usually wider, so centre it.
-      left: Math.max(0, Math.floor((cols - size) / 2)),
-      top: Math.max(0, Math.floor((rows - lines.length) / 2))
-    };
+    return { lines, rows: lines.length };
   }
 
-  // blessed has no 24-bit colour path, so the art is written straight to the
-  // terminal once blessed has finished painting the frame beneath it.
+  // blessed has no 24-bit colour path and no concept of an inline image, so the
+  // art goes straight to the terminal once blessed has painted the frame under
+  // it.
+  //
+  // Two traps here. blessed's program.write() bypasses its output buffer while
+  // cursorPos() goes through it, so mixing them emits the rows with no
+  // positioning at all — the image ends up smeared across the whole screen. And
+  // blessed's own frame is still sitting in that buffer when the render event
+  // fires. So: flush blessed first, then write one pre-built string, cursor
+  // moves included, directly to the output.
   paintAlbumArt() {
     if (!this.art || !this.albumArt.visible) return;
     if (!this.resultsList.hidden) return;
 
     const program = this.screen.program;
+    program.flush();
+
     const top = this.albumArt.atop + 1 + this.art.top;
     const left = this.albumArt.aleft + 1 + this.art.left;
+    const cup = (row) => `\x1b[${row + 1};${left + 1}H`;
 
-    this.art.lines.forEach((line, index) => {
-      program.cup(top + index, left);
-      program.write(line);
-    });
+    // DECSC/DECRC around the paint, and autowrap off so a row that runs long
+    // cannot spill into the pane below.
+    let out = '\x1b7\x1b[?7l';
+
+    if (this.art.payload) {
+      // The image payload is ~60KB. blessed leaves the pane alone once drawn
+      // (its content never changes), so repaint only when something could have
+      // covered it, with a slow heartbeat as insurance.
+      const stale = Date.now() - (this.artPaintedAt || 0) > 5000;
+      if (!this.artDirty && !stale) {
+        program.output.write('\x1b[?7h\x1b8');
+        return;
+      }
+
+      this.artDirty = false;
+      this.artPaintedAt = Date.now();
+      out += cup(top) + this.art.payload;
+    } else {
+      this.art.lines.forEach((line, index) => {
+        out += cup(top + index) + line;
+      });
+    }
+
+    program.output.write(out + '\x1b[?7h\x1b8');
   }
 
   displaySearchResults(results) {
@@ -596,7 +674,7 @@ on this device to start playing music.
 
   startUpdateLoop() {
     this.updateTrackInfo();
-    setInterval(() => this.updateTrackInfo(), 5000);
+    setInterval(() => this.updateTrackInfo(), 2000);
     setInterval(() => {
       this.renderProgress();
       this.screen.render();

@@ -124,8 +124,10 @@ The terminal interface is divided into several sections:
 - `Port 8888 is already in use` — free the port or change `PORT` in `.env` (and the dashboard)
 
 ### Album art not displaying
-- Covers are drawn with half-block characters (`▀`) and 256-color output; your
-  terminal needs both
+- On iTerm2 the cover is drawn as a real inline image. Everywhere else it falls
+  back to half-block characters (`▀`), in 24-bit color when `COLORTERM` says the
+  terminal supports it and the 256-color cube otherwise
+- Set `SPOT_ART=blocks` to force the half-block renderer on iTerm2
 - Check the log pane for the underlying error (usually a failed image fetch)
 
 ## License
