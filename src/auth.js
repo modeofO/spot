@@ -1,16 +1,17 @@
-const express = require('express');
-const https = require('https');
+const http = require('http');
 const axios = require('axios');
-const open = require('open');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-require('dotenv').config();
+require('dotenv').config({ quiet: true });
+
+const CALLBACK_TIMEOUT_MS = 5 * 60 * 1000;
 
 class SpotifyAuth {
   constructor() {
     this.clientId = process.env.SPOTIFY_CLIENT_ID;
-    this.redirectUri = 'https://example.com/callback';
+    this.port = Number(process.env.PORT) || 8888;
+    this.redirectUri = process.env.REDIRECT_URI || `http://127.0.0.1:${this.port}/callback`;
     this.tokenPath = path.join(__dirname, '../.spotify_token');
     this.scopes = [
       'user-read-playback-state',
@@ -21,6 +22,34 @@ class SpotifyAuth {
       'user-library-read',
       'user-read-private'
     ].join(' ');
+
+    this.validateRedirectUri();
+  }
+
+  // Spotify rejects `localhost` since 2025-04-09. Loopback must be a literal IP.
+  validateRedirectUri() {
+    let url;
+    try {
+      url = new URL(this.redirectUri);
+    } catch (err) {
+      throw new Error(`Invalid REDIRECT_URI: ${this.redirectUri}`);
+    }
+
+    if (url.hostname === 'localhost') {
+      throw new Error(
+        `Spotify no longer accepts "localhost" as a redirect URI.\n` +
+        `Use http://127.0.0.1:${this.port}/callback instead — update REDIRECT_URI in .env ` +
+        `and the redirect URI in your Spotify app dashboard.`
+      );
+    }
+
+    const isLoopback = url.hostname === '127.0.0.1' || url.hostname === '[::1]';
+    if (url.protocol !== 'https:' && !isLoopback) {
+      throw new Error(
+        `Redirect URI must use HTTPS, or an http:// loopback address (127.0.0.1 / [::1]).\n` +
+        `Got: ${this.redirectUri}`
+      );
+    }
   }
 
   generateCodeVerifier() {
@@ -33,51 +62,76 @@ class SpotifyAuth {
 
   generateAuthUrl() {
     this.codeVerifier = this.generateCodeVerifier();
+    this.state = crypto.randomBytes(16).toString('base64url');
     const codeChallenge = this.generateCodeChallenge(this.codeVerifier);
-    const state = Math.random().toString(36).substring(7);
-    
+
     const params = new URLSearchParams({
       response_type: 'code',
       client_id: this.clientId,
       scope: this.scopes,
       redirect_uri: this.redirectUri,
-      state: state,
+      state: this.state,
       code_challenge_method: 'S256',
       code_challenge: codeChallenge
     });
-    
+
     return `https://accounts.spotify.com/authorize?${params.toString()}`;
   }
 
-  async getAuthCodeManually() {
-    const readline = require('readline').createInterface({
-      input: process.stdin,
-      output: process.stdout
-    });
+  // Runs a one-shot loopback server that catches Spotify's redirect and reads
+  // the authorization code straight out of the query string.
+  waitForAuthCode() {
+    const callbackUrl = new URL(this.redirectUri);
+    const callbackPath = callbackUrl.pathname;
 
-    return new Promise((resolve) => {
-      console.log('\n📋 Manual Authentication Required');
-      console.log('=================================');
-      console.log('1. The browser will open to Spotify\'s authorization page');
-      console.log('2. After you authorize, you\'ll be redirected to a page that won\'t load');
-      console.log('3. Copy the ENTIRE URL from your browser\'s address bar');
-      console.log('4. Paste it below and press Enter\n');
+    return new Promise((resolve, reject) => {
+      const server = http.createServer((req, res) => {
+        const reqUrl = new URL(req.url, this.redirectUri);
+        if (reqUrl.pathname !== callbackPath) {
+          res.writeHead(404).end();
+          return;
+        }
 
-      readline.question('Paste the redirect URL here: ', (url) => {
-        readline.close();
-        try {
-          const urlObj = new URL(url);
-          const code = urlObj.searchParams.get('code');
-          if (code) {
-            resolve(code);
-          } else {
-            throw new Error('No authorization code found in URL');
-          }
-        } catch (error) {
-          console.error('❌ Invalid URL. Please try again.');
-          process.exit(1);
+        const code = reqUrl.searchParams.get('code');
+        const state = reqUrl.searchParams.get('state');
+        const error = reqUrl.searchParams.get('error');
+
+        const finish = (message, err) => {
+          res.writeHead(err ? 400 : 200, { 'Content-Type': 'text/html; charset=utf-8' });
+          res.end(`<!doctype html><meta charset="utf-8"><title>Spot</title>
+<body style="font-family:system-ui;background:#121212;color:#1db954;display:grid;place-items:center;height:100vh;margin:0">
+<h1>${message}</h1></body>`);
+          clearTimeout(timer);
+          server.close();
+          if (err) reject(err); else resolve(code);
+        };
+
+        if (error) {
+          finish('Authorization denied.', new Error(`Spotify returned: ${error}`));
+        } else if (!code) {
+          finish('No authorization code in callback.', new Error('No authorization code in callback'));
+        } else if (state !== this.state) {
+          finish('State mismatch — request rejected.', new Error('State mismatch: possible CSRF, aborting'));
+        } else {
+          finish('Authorized. You can close this tab.');
         }
       });
+
+      const timer = setTimeout(() => {
+        server.close();
+        reject(new Error('Timed out waiting for Spotify callback (5 minutes)'));
+      }, CALLBACK_TIMEOUT_MS);
+
+      server.on('error', (err) => {
+        clearTimeout(timer);
+        if (err.code === 'EADDRINUSE') {
+          reject(new Error(`Port ${this.port} is already in use — free it or set PORT in .env`));
+        } else {
+          reject(err);
+        }
+      });
+
+      server.listen(this.port, callbackUrl.hostname === '[::1]' ? '::1' : '127.0.0.1');
     });
   }
 
@@ -90,7 +144,7 @@ class SpotifyAuth {
       code_verifier: this.codeVerifier
     };
 
-    const response = await axios.post('https://accounts.spotify.com/api/token', 
+    const response = await axios.post('https://accounts.spotify.com/api/token',
       new URLSearchParams(data), {
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded'
@@ -104,7 +158,7 @@ class SpotifyAuth {
   }
 
   saveToken(tokenData) {
-    fs.writeFileSync(this.tokenPath, JSON.stringify(tokenData, null, 2));
+    fs.writeFileSync(this.tokenPath, JSON.stringify(tokenData, null, 2), { mode: 0o600 });
   }
 
   loadToken() {
@@ -116,10 +170,18 @@ class SpotifyAuth {
     }
   }
 
-  async refreshToken(refreshToken) {
+  clearToken() {
+    try {
+      fs.unlinkSync(this.tokenPath);
+    } catch (err) {
+      // nothing to clear
+    }
+  }
+
+  async refreshToken(tokenData) {
     const data = {
       grant_type: 'refresh_token',
-      refresh_token: refreshToken,
+      refresh_token: tokenData.refresh_token,
       client_id: this.clientId
     };
 
@@ -130,33 +192,62 @@ class SpotifyAuth {
       }
     });
 
+    // Spotify rotates the refresh token on PKCE refreshes. Keep whatever it
+    // hands back; only fall back to the old one when it omits a new one.
     const newTokenData = {
+      ...tokenData,
       ...response.data,
-      expires_at: Date.now() + (response.data.expires_in * 1000),
-      refresh_token: refreshToken
+      expires_at: Date.now() + (response.data.expires_in * 1000)
     };
+    if (!response.data.refresh_token) {
+      newTokenData.refresh_token = tokenData.refresh_token;
+    }
 
     this.saveToken(newTokenData);
     return newTokenData;
   }
 
+  async authorize() {
+    const authUrl = this.generateAuthUrl();
+    const codePromise = this.waitForAuthCode();
+
+    console.log(`Listening on ${this.redirectUri} for the Spotify callback...`);
+    console.log('Opening browser for authentication...');
+    const open = (await import('open')).default;
+    await open(authUrl);
+    console.log(`If the browser did not open, visit:\n${authUrl}\n`);
+
+    const code = await codePromise;
+    const tokenData = await this.exchangeCodeForToken(code);
+    this.saveToken(tokenData);
+    return tokenData;
+  }
+
   async getValidToken() {
     let tokenData = this.loadToken();
-    
+
     if (!tokenData) {
       console.log('No token found. Starting authentication...');
-      const authUrl = this.generateAuthUrl();
-      console.log('Opening browser for authentication...');
-      await open(authUrl);
-      
-      const code = await this.getAuthCodeManually();
-      tokenData = await this.exchangeCodeForToken(code);
-      this.saveToken(tokenData);
+      tokenData = await this.authorize();
     }
 
     if (Date.now() >= tokenData.expires_at) {
       console.log('Token expired. Refreshing...');
-      tokenData = await this.refreshToken(tokenData.refresh_token);
+      try {
+        tokenData = await this.refreshToken(tokenData);
+      } catch (error) {
+        // Only a rejected grant means the stored token is dead. Network errors
+        // must not wipe it — that would force a re-auth over a transient blip.
+        if (error.response?.data?.error !== 'invalid_grant') {
+          throw new Error(
+            `Could not refresh token: ${error.response?.data?.error_description || error.message}`
+          );
+        }
+        const reason = error.response.data.error_description || 'invalid_grant';
+        console.log(`Stored token rejected (${reason}). Re-authenticating...`);
+        this.clearToken();
+        tokenData = await this.authorize();
+      }
     }
 
     return tokenData.access_token;

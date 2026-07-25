@@ -32,15 +32,8 @@ async function main() {
       console.log(`✅ Connected as: ${userInfo.display_name || userInfo.id}`);
     } catch (error) {
       console.error('❌ Failed to connect to Spotify API:', error.message);
-      
-      // Delete the token file and try again
-      const fs = require('fs');
-      const path = require('path');
-      const tokenPath = path.join(__dirname, '../.spotify_token');
-      if (fs.existsSync(tokenPath)) {
-        fs.unlinkSync(tokenPath);
-        console.log('🔄 Deleted old token. Please restart the app to re-authenticate.');
-      }
+      auth.clearToken();
+      console.log('🔄 Deleted stored token. Restart the app to re-authenticate.');
       process.exit(1);
     }
     
